@@ -36,23 +36,15 @@ scraper:
   include_comments: true
   rate_limit_per_minute: 60
 
-# AI provider settings
+# AI provider — OpenAI-compatible
+# Set AI_API_KEY and optionally AI_BASE_URL in your .env file.
+# To switch models, edit model_filter and model_deep below.
 ai:
-  provider: openai
-  openai:
-    model_filter: gpt-5-mini
-    model_deep: gpt-5.1
-    enqueued_token_limits:
-      gpt-5.1: 900_000
-    default_enqueued_token_limit: 5_000_000
-  anthropic:
-    model_filter: claude-haiku-4-5-20251001
-    model_deep: claude-sonnet-4-5-20250929
-    default_enqueued_token_limit: 10_000_000
-  use_batch_api: true
-  monthly_budget_usd: 100
+  base_url: https://api.frenix.sh/v1
+  model_filter: gpt-4o-mini
+  model_deep: gpt-4o
   max_tokens_per_post: 1000
-  cache_input: true
+  monthly_budget_usd: 100
 
 # Scoring weights
 scoring:
@@ -71,7 +63,6 @@ database:
 
 # Logging & output
 log_level: DEBUG
-save_batch_payloads: true
 
 cleanup:
   batch_response_retention_days: 3
