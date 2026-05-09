@@ -1,205 +1,210 @@
-import praw
+import requests
+import time
 import datetime
 import os
-import socket
-import time
 
-from prawcore.exceptions import RequestException
 from db.reader import is_already_processed
 from db.writer import insert_post
 from reddit.discovery import discover_adjacent_subreddits
 from config.config_loader import get_config
 from utils.logger import setup_logger
 from utils.helpers import load_json, save_json, truncate
-from reddit.rate_limiter import RedditRateLimiter
-
-socket.setdefaulttimeout(10)  # Set global 10s timeout for HTTP
 
 log = setup_logger()
 config = get_config()
 
-# Initialize Reddit API client
-reddit = praw.Reddit(
-    client_id=config["reddit"]["client_id"],
-    client_secret=config["reddit"]["client_secret"],
-    user_agent=config["reddit"]["user_agent"],
-    username=config["reddit"]["username"],
-    password=config["reddit"]["password"]
-)
-
-limiter = RedditRateLimiter(config["scraper"].get("rate_limit_per_minute", 60))
+BASE_URL = "https://www.reddit.com"
+# Reddit blocks generic User-Agent strings; use a descriptive one.
+HEADERS = {"User-Agent": "emotional-trend-miner/1.0 (non-commercial research tool)"}
 EXPLORATORY_FILE = "data/exploratory_subreddits.json"
+REQUEST_DELAY = config["scraper"].get("request_delay_seconds", 2)
 
-def is_post_in_age_range(post, min_days, max_days) -> bool:
-    post_date = datetime.datetime.fromtimestamp(post.created_utc)
-    age_days = (datetime.datetime.utcnow() - post_date).days
+
+def _get(url: str, params: dict = None, retries: int = 3) -> dict | None:
+    """HTTP GET with exponential-backoff retry."""
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
+            if resp.status_code == 200:
+                return resp.json()
+            elif resp.status_code == 429:
+                wait = 10 * (2 ** attempt)
+                log.warning(f"Rate limited by Reddit. Waiting {wait}s...")
+                time.sleep(wait)
+            elif resp.status_code in (403, 404):
+                log.warning(f"HTTP {resp.status_code} for {url} — skipping")
+                return None
+            else:
+                log.warning(f"HTTP {resp.status_code} for {url} (attempt {attempt + 1}/{retries})")
+                time.sleep(2 * (2 ** attempt))
+        except requests.RequestException as e:
+            log.error(f"Request error (attempt {attempt + 1}/{retries}): {e}")
+            time.sleep(2 * (2 ** attempt))
+    return None
+
+
+def _is_in_age_range(created_utc: float, min_days: int, max_days: int) -> bool:
+    age_days = (datetime.datetime.utcnow() - datetime.datetime.utcfromtimestamp(created_utc)).days
     return min_days <= age_days <= max_days
 
-def fetch_posts_from_subreddit(subreddit_name, limit=200) -> list:
-    min_days = config["scraper"]["min_post_age_days"]
-    max_days = config["scraper"]["max_post_age_days"]
-    include_comments = config["scraper"].get("include_comments", False)
-    results = []
-    seen_ids = set()
 
-    post_skip_seen = 0
-    post_skip_age = 0
-    post_skip_dupl = 0
-    post_remaining = 0
-    comment_fetched = 0
-    comment_skip_seen = 0
-    comment_skip_age = 0
-    comment_skip_dupl = 0
-    comment_remaining = 0
+def _parse_post(data: dict, subreddit_name: str) -> dict:
+    return {
+        "id":           data["id"],
+        "title":        data.get("title", ""),
+        "body":         data.get("selftext", ""),
+        "score":        data.get("score", 0),
+        "num_comments": data.get("num_comments", 0),
+        "created_utc":  data["created_utc"],
+        "subreddit":    subreddit_name,
+        "url":          f"{BASE_URL}{data['permalink']}",
+        "type":         "post",
+    }
 
-    try:
-        log.info(f"Fetching posts from r/{subreddit_name} using top, hot, and new...")
-        subreddit = reddit.subreddit(subreddit_name)
-        combined = []
 
-        for fetch_name, fetch_method in [("top", subreddit.top(time_filter="month", limit=limit)),
-                                         ("hot", subreddit.hot(limit=limit)),
-                                         ("new", subreddit.new(limit=limit))]:
-            limiter.wait()  # Apply rate limit per API fetch
-            posts = safe_fetch(fetch_method, fetch_name)
-            combined.extend(posts)
-
-        log.info(f"Total fetched posts to process from r/{subreddit_name}: {len(combined)}")
-        start_time = time.time()
-
-        for i, post in enumerate(combined):
-            if i % 10 == 0:
-                log.info(f"Processing post #{i+1}/{len(combined)}")
-
-            if post.id in seen_ids:
-                post_skip_seen += 1
-                continue
-            seen_ids.add(post.id)
-
-            created_at = datetime.datetime.fromtimestamp(post.created_utc)
-            log.debug(f"Post {post.id} at {created_at.isoformat()} — {post.title[:60]}")
-
-            if not is_post_in_age_range(post, min_days, max_days):
-                post_skip_age += 1
-                continue
-            if is_already_processed(post.id):
-                post_skip_dupl += 1
-                continue
-
-            results.append({
-                "id": post.id,
-                "title": post.title,
-                "body": post.selftext,
-                "created_utc": post.created_utc,
-                "subreddit": subreddit_name,
-                "url": f"https://www.reddit.com{post.permalink}",
-                "type": "post"
-            })
-            post_remaining += 1
-
-            if include_comments:
-                try:
-                    limiter.wait()  # One API call to fetch all comments
-                    post.comments.replace_more(limit=0)
-                    comments_list = post.comments.list()
-                    comment_fetched += len(comments_list)
-                    for comment in comments_list:
-                        if comment.id in seen_ids:
-                            comment_skip_seen += 1
-                            continue
-                        seen_ids.add(comment.id)
-
-                        if not is_post_in_age_range(comment, min_days, max_days):
-                            comment_skip_age += 1
-                            continue
-                        if is_already_processed(comment.id):
-                            comment_skip_dupl += 1
-                            continue
-
-                        results.append({
-                            "id": comment.id,
-                            "title": post.title,
-                            "body": comment.body,
-                            "post_body": post.selftext,
-                            "created_utc": comment.created_utc,
-                            "subreddit": subreddit_name,
-                            "url": f"https://www.reddit.com{comment.permalink}",
-                            "type": "comment",
-                            "parent_post_id": post.id,
-                        })
-                        comment_remaining += 1
-                except Exception as e:
-                    log.warning(f"Failed to fetch comments for post {post.id}: {str(e)}")
-
-        sum_fetched = len(combined) + comment_fetched
-        sum_skip_seen = post_skip_seen + comment_skip_seen
-        sum_skip_age = post_skip_age + comment_skip_age
-        sum_skip_dupl = post_skip_dupl + comment_skip_dupl
-
-        log.info(f"{'r/' + subreddit_name:<25} | {'Fetched':<12} | {'Skip (seen)':<12} | {'Skip (age)':<12} | {'Skip (dup)':<12} | {'Remaining':<12}")
-        log.info(f"{'Posts':<25} | {len(combined):<12} | {post_skip_seen:<12} | {post_skip_age:<12} | {post_skip_dupl:<12} | {post_remaining:<12}")
-        log.info(f"{'Comments':<25} | {comment_fetched:<12} | {comment_skip_seen:<12} | {comment_skip_age:<12} | {comment_skip_dupl:<12} | {comment_remaining:<12}")
-        log.info(f"{'Sum':<25} | {sum_fetched:<12} | {sum_skip_seen:<12} | {sum_skip_age:<12} | {sum_skip_dupl:<12} | {len(results):<12}")
-
-    except Exception as e:
-        log.error(f"Error fetching from r/{subreddit_name}: {str(e)}")
-
-    log.info(f"Finished processing posts from r/{subreddit_name} in {time.time() - start_time:.2f} seconds")
-    return results
-
-def get_exploratory_subreddits():
-    if not os.path.exists(EXPLORATORY_FILE):
+def _fetch_comments(post: dict, max_comments: int = 10) -> list:
+    """Fetch top-level comments for a post via the public JSON API."""
+    url = f"{BASE_URL}/r/{post['subreddit']}/comments/{post['id']}.json"
+    data = _get(url, params={"limit": max_comments, "depth": 1, "sort": "top"})
+    if not data or len(data) < 2:
         return []
 
+    comments = []
+    for child in data[1].get("data", {}).get("children", []):
+        if child.get("kind") != "t1":
+            continue
+        c = child["data"]
+        body = c.get("body", "")
+        if not body or body in ("[deleted]", "[removed]"):
+            continue
+        if is_already_processed(c["id"]):
+            continue
+        comments.append({
+            "id":            c["id"],
+            "title":         post["title"],
+            "body":          body,
+            "post_body":     post["body"],
+            "score":         c.get("score", 0),
+            "num_comments":  0,
+            "created_utc":   c.get("created_utc", post["created_utc"]),
+            "subreddit":     post["subreddit"],
+            "url":           f"{BASE_URL}{c.get('permalink', '')}",
+            "type":          "comment",
+            "parent_post_id": post["id"],
+        })
+    return comments
+
+
+def fetch_posts_from_subreddit(subreddit_name: str, limit: int = 100) -> list:
+    min_days = config["scraper"]["min_post_age_days"]
+    max_days  = config["scraper"]["max_post_age_days"]
+    include_comments = config["scraper"].get("include_comments", False)
+    results  = []
+    seen_ids = set()
+
+    for feed in ("new", "hot"):
+        url   = f"{BASE_URL}/r/{subreddit_name}/{feed}.json"
+        after = None
+        feed_fetched = 0
+        log.info(f"  r/{subreddit_name}/{feed} — requesting up to {limit} posts")
+
+        while feed_fetched < limit:
+            params = {"limit": min(100, limit - feed_fetched), "raw_json": 1}
+            if after:
+                params["after"] = after
+
+            data = _get(url, params=params)
+            if not data:
+                break
+
+            children = data.get("data", {}).get("children", [])
+            if not children:
+                break
+
+            for child in children:
+                post_data = child.get("data", {})
+                post_id   = post_data.get("id")
+                if not post_id or post_id in seen_ids:
+                    continue
+                seen_ids.add(post_id)
+
+                if not _is_in_age_range(post_data["created_utc"], min_days, max_days):
+                    continue
+                if is_already_processed(post_id):
+                    continue
+
+                post = _parse_post(post_data, subreddit_name)
+                results.append(post)
+
+                if include_comments:
+                    time.sleep(REQUEST_DELAY)
+                    results.extend(_fetch_comments(post))
+
+            after = data.get("data", {}).get("after")
+            feed_fetched += len(children)
+            if not after:
+                break
+
+            time.sleep(REQUEST_DELAY)  # between pagination requests
+
+        time.sleep(REQUEST_DELAY)  # between feeds
+
+    log.info(f"  r/{subreddit_name}: {len(results)} items collected")
+    return results
+
+
+def get_exploratory_subreddits() -> list:
+    if not os.path.exists(EXPLORATORY_FILE):
+        return []
     data = load_json(EXPLORATORY_FILE)
     last_updated = data.get("last_updated", "")
     refresh_days = config["subreddits"]["exploratory_refresh_days"]
-
-    if not last_updated or (datetime.datetime.utcnow() - datetime.datetime.fromisoformat(last_updated)).days >= refresh_days:
+    if not last_updated or (
+        datetime.datetime.utcnow() - datetime.datetime.fromisoformat(last_updated)
+    ).days >= refresh_days:
         log.info("Exploratory subreddit list needs refresh")
         return []
-
     return data.get("subreddits", [])
 
 
-def update_exploratory_subreddits(new_subreddits):
+def update_exploratory_subreddits(new_subreddits: list):
     data = {
         "last_updated": datetime.datetime.utcnow().isoformat(),
-        "subreddits": new_subreddits
+        "subreddits":   new_subreddits,
     }
     os.makedirs("data", exist_ok=True)
     save_json(data, EXPLORATORY_FILE)
     log.info(f"Updated exploratory subreddits: {', '.join(new_subreddits)}")
 
+
 def scrape_subreddits() -> list:
-    """Scrapes the configured subreddits as well as exploratory ones."""
-    primary_subreddits = config["subreddits"]["primary"]
-    primary_pct = config["subreddits"]["primary_percentage"]
-    exploratory_pct = config["subreddits"]["exploratory_percentage"]
-    exploratory_limit = config["subreddits"]["exploratory_limit"]
+    """Scrape configured primary (and optionally exploratory) subreddits."""
+    primary_subreddits  = config["subreddits"]["primary"]
+    primary_pct         = config["subreddits"]["primary_percentage"]
+    exploratory_pct     = config["subreddits"]["exploratory_percentage"]
+    exploratory_limit   = config["subreddits"]["exploratory_limit"]
     exploratory_enabled = config["subreddits"].get("exploratory_enabled", True)
 
-    total_limit = config["scraper"]["max_items_per_day"]
-    primary_limit = int((primary_pct / 100) * total_limit)
-    exploratory_limit_posts = int((exploratory_pct / 100) * total_limit)
+    total_limit              = config["scraper"]["max_items_per_day"]
+    primary_limit            = int((primary_pct / 100) * total_limit)
+    exploratory_limit_posts  = int((exploratory_pct / 100) * total_limit)
 
-    log.info(f"Scraping {len(primary_subreddits)} primary subreddits...")
-    per_primary_subreddit = max(1, primary_limit // len(primary_subreddits))
-    primary_posts = []
+    per_primary = max(1, primary_limit // len(primary_subreddits))
+    log.info(f"Scraping {len(primary_subreddits)} primary subreddits ({per_primary} posts/sub)...")
 
+    all_posts = []
     for sub in primary_subreddits:
-        posts = fetch_posts_from_subreddit(sub, limit=per_primary_subreddit)
+        posts = fetch_posts_from_subreddit(sub, limit=per_primary)
         for post in posts:
             insert_post(post, community_type="primary")
-        primary_posts.extend(posts)
+        all_posts.extend(posts)
 
     if exploratory_enabled:
         exploratory_subreddits = get_exploratory_subreddits()
-
         if not exploratory_subreddits:
-            if primary_posts:
+            if all_posts:
                 log.info("Discovering new exploratory subreddits...")
-                summaries = [truncate(f"{p['title']} {p['body']}", 300) for p in primary_posts[:10]]
+                summaries = [truncate(f"{p['title']} {p['body']}", 300) for p in all_posts[:10]]
                 suggestions = discover_adjacent_subreddits(summaries)
                 exploratory_subreddits = [s["subreddit"] for s in suggestions][:exploratory_limit]
                 update_exploratory_subreddits(exploratory_subreddits)
@@ -207,27 +212,15 @@ def scrape_subreddits() -> list:
                 log.warning("No primary posts found to discover exploratory subreddits")
 
         if exploratory_subreddits:
-            log.info(f"Scraping {len(exploratory_subreddits)} exploratory subreddits...")
             per_exploratory = max(1, exploratory_limit_posts // len(exploratory_subreddits))
-
+            log.info(f"Scraping {len(exploratory_subreddits)} exploratory subreddits...")
             for sub in exploratory_subreddits:
                 posts = fetch_posts_from_subreddit(sub, limit=per_exploratory)
                 for post in posts:
                     insert_post(post, community_type="exploratory")
-                primary_posts.extend(posts)
+                all_posts.extend(posts)
     else:
         log.info("Exploratory subreddit discovery is disabled (exploratory_enabled: false)")
 
-    log.info(f"Total items scraped: {len(primary_posts)}")
-    return primary_posts
-
-def safe_fetch(generator, name):
-    try:
-        log.info(f"→ Fetching {name}...")
-        return list(generator)
-    except (RequestException, socket.timeout) as e:
-        log.error(f"Timeout/error while fetching {name}: {e}")
-        return []
-    except Exception as e:
-        log.error(f"Unknown error while fetching {name}: {e}")
-        return []
+    log.info(f"Total items scraped: {len(all_posts)}")
+    return all_posts

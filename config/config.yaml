@@ -30,11 +30,11 @@ subreddits:
 
 # Reddit scraping settings
 scraper:
-  min_post_age_days: 5
+  min_post_age_days: 1
   max_post_age_days: 7
-  max_items_per_day: 10
-  include_comments: true
-  rate_limit_per_minute: 60
+  max_items_per_day: 50     # increase this for more coverage across 21 subreddits
+  include_comments: false   # set true to also fetch top comments per post (2x API calls)
+  request_delay_seconds: 2  # seconds between HTTP requests (be respectful)
 
 # AI provider — OpenAI-compatible
 # Set AI_API_KEY and optionally AI_BASE_URL in your .env file.
