@@ -21,6 +21,11 @@ def is_valid_post(post: dict) -> bool:
 def run_daily_pipeline():
     log.info("\U0001F680 Starting Reddit scraping and analysis pipeline")
 
+    ai_cfg = config["ai"]
+    log.info(f"AI provider : {ai_cfg.get('base_url')}")
+    log.info(f"Filter model: {ai_cfg.get('model_filter')}")
+    log.info(f"Deep model  : {ai_cfg.get('model_deep')}")
+
     ensure_directory_exists("data")
     create_tables()
     initialize_cost_tracking()
@@ -43,8 +48,9 @@ def run_daily_pipeline():
     score_threshold = weights.get("score_threshold", 6.0)
 
     # ── Phase 1: emotional filter ──────────────────────────────────────────
-    log.info(f"Step 3: Phase 1 — filtering {len(scraped_posts)} posts (threshold={score_threshold})...")
-    scored: dict[str, tuple] = {}  # post_id -> (post, weighted_score)
+    log.info(f"Step 3: Phase 1 — filtering {len(scraped_posts)} posts "
+             f"(model={ai_cfg.get('model_filter')}, threshold={score_threshold})...")
+    scored: dict[str, tuple] = {}
     below_threshold_ids: list[str] = []
 
     for i, post in enumerate(scraped_posts, 1):
@@ -56,13 +62,13 @@ def run_daily_pipeline():
             update_post_filter_scores(post["id"], scores)
 
             weighted_score = (
-                scores.get("relevance_score", 0)           * weights["relevance_weight"] +
-                scores.get("emotional_intensity", 0)        * weights["emotion_weight"] +
-                scores.get("pain_point_clarity", 0)         * weights["pain_point_weight"] +
-                scores.get("relatability_score", 0)         * weights.get("relatability_weight", 0.20) +
-                scores.get("content_potential_score", 0)    * weights.get("content_potential_weight", 0.15)
+                scores.get("relevance_score", 0)         * weights["relevance_weight"] +
+                scores.get("emotional_intensity", 0)      * weights["emotion_weight"] +
+                scores.get("pain_point_clarity", 0)       * weights["pain_point_weight"] +
+                scores.get("relatability_score", 0)       * weights.get("relatability_weight", 0.20) +
+                scores.get("content_potential_score", 0)  * weights.get("content_potential_weight", 0.15)
             )
-            log.debug(f"    weighted_score={weighted_score:.2f}")
+            log.debug(f"    scores={scores} | weighted={weighted_score:.2f}")
 
             if weighted_score >= score_threshold:
                 scored[post["id"]] = (post, weighted_score)
@@ -70,14 +76,15 @@ def run_daily_pipeline():
                 below_threshold_ids.append(post["id"])
 
         except Exception as e:
-            log.error(f"Filter failed for {post['id']}: {e}")
+            log.error(f"  ❌ Filter failed for {post['id']} ({post['title'][:50]}): "
+                      f"{type(e).__name__}: {e}")
             below_threshold_ids.append(post["id"])
 
     if below_threshold_ids:
         mark_posts_in_history(below_threshold_ids)
         log.info(f"Marked {len(below_threshold_ids)} below-threshold posts in history.")
 
-    # Deduplicate: keep the best-scoring post per thread
+    # Deduplicate: keep best-scoring post per thread
     parent_mapping = get_post_parent_mapping(set(scored.keys()))
     thread_best: dict[str, tuple] = {}
     for post_id, (post, score) in scored.items():
@@ -86,14 +93,16 @@ def run_daily_pipeline():
             thread_best[thread_id] = (post, score)
 
     high_potential = [post for post, _ in thread_best.values()]
-    log.info(f"Step 4: {len(high_potential)} high-potential posts after dedup.")
+    log.info(f"Step 4: {len(high_potential)} high-potential posts after dedup "
+             f"(threshold={score_threshold}).")
 
     if not high_potential:
         log.info("No high-value posts. Exiting pipeline.")
         return
 
     # ── Phase 2: deep content intelligence ────────────────────────────────
-    log.info(f"Step 5: Phase 2 — deep analysis of {len(high_potential)} posts...")
+    log.info(f"Step 5: Phase 2 — deep analysis of {len(high_potential)} posts "
+             f"(model={ai_cfg.get('model_deep')})...")
     insight_completed_ids: list[str] = []
 
     for i, post in enumerate(high_potential, 1):
@@ -106,7 +115,8 @@ def run_daily_pipeline():
             mark_insight_processed(post["id"])
             insight_completed_ids.append(post["id"])
         except Exception as e:
-            log.error(f"Insight failed for {post['id']}: {e}")
+            log.error(f"  ❌ Insight failed for {post['id']} ({post['title'][:50]}): "
+                      f"{type(e).__name__}: {e}")
 
     if insight_completed_ids:
         mark_posts_in_history(insight_completed_ids)
