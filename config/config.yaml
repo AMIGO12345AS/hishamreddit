@@ -30,11 +30,25 @@ subreddits:
 
 # Reddit scraping settings
 scraper:
-  min_post_age_days: 5
-  max_post_age_days: 7
-  max_items_per_day: 10
+  # Post filtering by age
+  min_post_age_days: 0       # Include fresh posts (0-24 hours)
+  max_post_age_days: 7       # Up to 7 days old
+  prefer_fresh_hours: 24     # Prioritize posts <24 hours old
+  
+  # Volume settings
+  posts_per_feed: 50         # Posts to fetch per feed (top/hot/new)
+  total_posts_per_subreddit: 100  # Target total posts per subreddit
+  comments_per_post: 25      # Comments to fetch per post
+  max_items_per_day: 500     # Total daily limit across all subreddits
+  
+  # Performance settings
   include_comments: true
   rate_limit_per_minute: 60
+  request_delay_seconds: 0.5 # Delay between requests (Reddit-friendly)
+  
+  # Engagement thresholds (minimum to include)
+  min_post_score: 1          # Minimum upvotes
+  min_comment_score: 1       # Minimum comment upvotes
 
 # AI provider settings
 ai:
