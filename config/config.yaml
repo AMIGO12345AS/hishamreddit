@@ -56,13 +56,12 @@ ai:
 
 # Scoring weights
 scoring:
-  relevance_weight: 0.25
-  emotion_weight: 0.1
-  pain_point_weight: 0.2
-  implementability_weight: 0.15
-  technical_depth_weight: 0.2
-  recent_activity_weight: 0.1
-  min_technical_depth: 4
+  relevance_weight: 0.20
+  emotion_weight: 0.25
+  pain_point_weight: 0.20
+  relatability_weight: 0.20
+  content_potential_weight: 0.15
+  score_threshold: 6.0
   output_top_n: 10
 
 # Database settings
