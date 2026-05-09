@@ -1,0 +1,78 @@
+# Target communities
+subreddits:
+  primary:
+    - AsianMasculinity
+    - DecidingToBeBetter
+    - AskMen
+    - exredpill
+    - getdisciplined
+    - Healthygamergg
+    - GetMotivated
+    - malementalhealth
+    - manprovement
+    - lonely
+    - MensLib
+    - masculinity_rocks
+    - menslibIndia
+    - MensRights
+    - PornFreeRelationships
+    - socialskills
+    - RedPillMen
+    - selfimprovement
+    - RedPillWomen
+    - PurplePillDebate
+    - productivity
+  exploratory_enabled: false
+  exploratory_limit: 12
+  exploratory_refresh_days: 7
+  exploratory_percentage: 0
+  primary_percentage: 100
+
+# Reddit scraping settings
+scraper:
+  min_post_age_days: 5
+  max_post_age_days: 7
+  max_items_per_day: 10
+  include_comments: true
+  rate_limit_per_minute: 60
+
+# AI provider settings
+ai:
+  provider: openai
+  openai:
+    model_filter: gpt-5-mini
+    model_deep: gpt-5.1
+    enqueued_token_limits:
+      gpt-5.1: 900_000
+    default_enqueued_token_limit: 5_000_000
+  anthropic:
+    model_filter: claude-haiku-4-5-20251001
+    model_deep: claude-sonnet-4-5-20250929
+    default_enqueued_token_limit: 10_000_000
+  use_batch_api: true
+  monthly_budget_usd: 100
+  max_tokens_per_post: 1000
+  cache_input: true
+
+# Scoring weights
+scoring:
+  relevance_weight: 0.25
+  emotion_weight: 0.1
+  pain_point_weight: 0.2
+  implementability_weight: 0.15
+  technical_depth_weight: 0.2
+  recent_activity_weight: 0.1
+  min_technical_depth: 4
+  output_top_n: 10
+
+# Database settings
+database:
+  path: data/db.sqlite
+  retention_days: 90
+
+# Logging & output
+log_level: DEBUG
+save_batch_payloads: true
+
+cleanup:
+  batch_response_retention_days: 3
